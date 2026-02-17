@@ -67,7 +67,7 @@ permissions:
 
 jobs:
   deploy:
-    uses: your-org/github-actions-shared-workflows/.github/workflows/ci-cd-template.yml@main
+    uses: davidcopter/ci-cd-shared-workflows/.github/workflows/ci-cd-template.yml@main
     with:
       service_name: my-service
       gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
