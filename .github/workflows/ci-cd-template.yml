@@ -1,0 +1,434 @@
+name: Reusable CI/CD Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: "Name of the service being built"
+        required: true
+        type: string
+      dockerfile_path:
+        description: "Path to Dockerfile"
+        required: false
+        type: string
+        default: "./Dockerfile"
+      docker_build_context:
+        description: "Docker build context"
+        required: false
+        type: string
+        default: "."
+      gcp_project_id:
+        description: "GCP Project ID"
+        required: true
+        type: string
+      gcp_region:
+        description: "GCP Region for GCR"
+        required: false
+        type: string
+        default: "us-central1"
+      gcr_hostname:
+        description: "GCR hostname"
+        required: false
+        type: string
+        default: "gcr.io"
+      workload_identity_provider:
+        description: "GCP Workload Identity Provider"
+        required: true
+        type: string
+      service_account:
+        description: "GCP Service Account email"
+        required: true
+        type: string
+      gitops_repo:
+        description: "GitOps repository (owner/repo)"
+        required: true
+        type: string
+      helm_chart_path:
+        description: "Path to Helm chart values.yaml in GitOps repo"
+        required: true
+        type: string
+      enable_cache:
+        description: "Enable Docker layer caching"
+        required: false
+        type: boolean
+        default: true
+      platforms:
+        description: "Target platforms for multi-arch build"
+        required: false
+        type: string
+        default: "linux/amd64,linux/arm64"
+
+    outputs:
+      image_tag:
+        description: "Generated image tag"
+        value: ${{ jobs.build-and-deploy.outputs.image_tag }}
+      image_uri:
+        description: "Full image URI"
+        value: ${{ jobs.build-and-deploy.outputs.image_uri }}
+      is_semantic_version:
+        description: "Whether the tag is a semantic version"
+        value: ${{ jobs.build-and-deploy.outputs.is_semantic_version }}
+      deployment_status:
+        description: "Deployment status (success, failure, or skipped)"
+        value: ${{ jobs.build-and-deploy.outputs.deployment_status }}
+      build_duration_seconds:
+        description: "Build duration in seconds"
+        value: ${{ jobs.build-and-deploy.outputs.build_duration_seconds }}
+      gitops_pr_number:
+        description: "Pull request number created in GitOps repo"
+        value: ${{ jobs.build-and-deploy.outputs.gitops_pr_number }}
+      gitops_pr_url:
+        description: "Pull request URL created in GitOps repo"
+        value: ${{ jobs.build-and-deploy.outputs.gitops_pr_url }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.derive-tags.outputs.image_tag }}
+      image_uri: ${{ steps.build-push.outputs.image_uri }}
+      is_semantic_version: ${{ steps.derive-tags.outputs.is_semantic_version }}
+      deployment_status: ${{ steps.set-deployment-status.outputs.status }}
+      build_duration_seconds: ${{ steps.calculate-duration.outputs.duration_seconds }}
+      gitops_pr_number: ${{ steps.create-pr.outputs.pull-request-number }}
+      gitops_pr_url: ${{ steps.create-pr.outputs.pull-request-url }}
+
+    steps:
+      - name: Record Build Start Time
+        id: build-start
+        run: |
+          echo "start_time=$(date +%s)" >> $GITHUB_OUTPUT
+          echo "start_time_iso=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.workload_identity_provider }}
+          service_account: ${{ inputs.service_account }}
+          token_format: access_token
+
+      - name: Setup GCloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ inputs.gcp_project_id }}
+
+      - name: Configure Docker for GCR
+        run: |
+          gcloud auth configure-docker ${{ inputs.gcr_hostname }} --quiet
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+          buildkitd-flags: --debug
+
+      - name: Derive Image Tags
+        id: derive-tags
+        shell: bash
+        run: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          # Get branch name or tag
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            REF_NAME="${{ github.ref_name }}"
+          elif [[ "${{ github.ref }}" == refs/heads/* ]]; then
+            REF_NAME="${{ github.ref_name }}"
+          else
+            REF_NAME="${{ github.sha }}"
+          fi
+
+          # Get short SHA
+          SHORT_SHA="${{ github.sha }}"
+          SHORT_SHA="${SHORT_SHA:0:7}"
+
+          # Initialize variables
+          PRIMARY_TAG=""
+          ADDITIONAL_TAGS=""
+          IS_SEMANTIC="false"
+
+          echo "Processing ref: $REF_NAME (SHA: $SHORT_SHA)"
+
+          # Main branch - semantic versioning + latest
+          if [[ "$REF_NAME" == "main" || "$REF_NAME" == "master" ]]; then
+            # Extract version from git tags or use default
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            
+            # Parse semantic version
+            if [[ "$LATEST_TAG" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              MAJOR="${BASH_REMATCH[1]}"
+              MINOR="${BASH_REMATCH[2]}"
+              PATCH="${BASH_REMATCH[3]}"
+              
+              # Increment patch for new build
+              NEW_PATCH=$((PATCH + 1))
+              PRIMARY_TAG="${MAJOR}.${MINOR}.${NEW_PATCH}"
+              IS_SEMANTIC="true"
+            else
+              # Fallback to SHA-based tag
+              PRIMARY_TAG="main-${SHORT_SHA}"
+            fi
+            
+            ADDITIONAL_TAGS="latest"
+
+          # Release branches - Release Candidates
+          elif [[ "$REF_NAME" =~ ^release/([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            PATCH="${BASH_REMATCH[3]}"
+            
+            # Count commits on release branch for RC number
+            RC_NUMBER=$(git rev-list --count "${{ github.sha }}")
+            PRIMARY_TAG="${MAJOR}.${MINOR}.${PATCH}-rc.${RC_NUMBER}"
+            IS_SEMANTIC="true"
+
+          # Develop branch
+          elif [[ "$REF_NAME" == "develop" ]]; then
+            PRIMARY_TAG="develop-${SHORT_SHA}"
+
+          # Feature branches and others
+          else
+            # Sanitize branch name (replace / with -, remove special chars)
+            SANITIZED_REF=$(echo "$REF_NAME" | sed 's/\//-/g' | sed 's/[^a-zA-Z0-9._-]//g' | tr '[:upper:]' '[:lower:]')
+            
+            # Limit length to 50 chars
+            if [[ ${#SANITIZED_REF} -gt 43 ]]; then
+              SANITIZED_REF="${SANITIZED_REF:0:43}"
+            fi
+            
+            PRIMARY_TAG="${SANITIZED_REF}-${SHORT_SHA}"
+          fi
+
+          echo "image_tag=${PRIMARY_TAG}" >> $GITHUB_OUTPUT
+          echo "additional_tags=${ADDITIONAL_TAGS}" >> $GITHUB_OUTPUT
+          echo "is_semantic_version=${IS_SEMANTIC}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+          echo "Generated tags:"
+          echo "  Primary: ${PRIMARY_TAG}"
+          echo "  Additional: ${ADDITIONAL_TAGS}"
+          echo "  Is Semantic: ${IS_SEMANTIC}"
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ inputs.gcr_hostname }}/${{ inputs.gcp_project_id }}/${{ inputs.service_name }}
+          tags: |
+            type=raw,value=${{ steps.derive-tags.outputs.image_tag }}
+            ${{ steps.derive-tags.outputs.additional_tags && format('type=raw,value={0}', steps.derive-tags.outputs.additional_tags) || '' }}
+
+      - name: Build and Push Docker Image
+        id: build-push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.docker_build_context }}
+          file: ${{ inputs.dockerfile_path }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ inputs.platforms }}
+          cache-from: |
+            type=gha,scope=${{ inputs.service_name }}
+            type=registry,ref=${{ inputs.gcr_hostname }}/${{ inputs.gcp_project_id }}/${{ inputs.service_name }}:buildcache
+          cache-to: |
+            type=gha,scope=${{ inputs.service_name }},mode=max
+            type=registry,ref=${{ inputs.gcr_hostname }}/${{ inputs.gcp_project_id }}/${{ inputs.service_name }}:buildcache,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ steps.derive-tags.outputs.image_tag }}
+
+      - name: Output Image URI
+        id: image-uri
+        run: |
+          IMAGE_URI="${{ inputs.gcr_hostname }}/${{ inputs.gcp_project_id }}/${{ inputs.service_name }}:${{ steps.derive-tags.outputs.image_tag }}"
+          echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "Built and pushed: ${IMAGE_URI}"
+
+      - name: Checkout GitOps Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.gitops_repo }}
+          token: ${{ secrets.GITOPS_TOKEN || github.token }}
+          path: gitops-repo
+
+      - name: Update Helm Values
+        id: update-helm
+        run: |
+          cd gitops-repo
+
+          CHART_PATH="${{ inputs.helm_chart_path }}"
+          IMAGE_TAG="${{ steps.derive-tags.outputs.image_tag }}"
+          SERVICE_NAME="${{ inputs.service_name }}"
+
+          echo "Updating Helm values for ${SERVICE_NAME}"
+          echo "Chart path: ${CHART_PATH}"
+          echo "New image tag: ${IMAGE_TAG}"
+
+          # Check if values.yaml exists
+          if [[ ! -f "${CHART_PATH}" ]]; then
+            echo "Error: Helm values file not found at ${CHART_PATH}"
+            exit 1
+          fi
+
+          # Update image tag in values.yaml
+          # Assumes structure: image: tag: "value"
+          if grep -q "^image:" "${CHART_PATH}"; then
+            # Using yq if available, otherwise sed
+            if command -v yq &> /dev/null; then
+              yq eval ".image.tag = \"${IMAGE_TAG}\"" -i "${CHART_PATH}"
+            else
+              # Fallback to sed - update image.tag line
+              sed -i "s/\(tag:\s*\"\?\)[^\"]*\(\"\?\s*\)$/\1${IMAGE_TAG}\2/" "${CHART_PATH}"
+            fi
+          else
+            # Add image section if not exists
+            echo "" >> "${CHART_PATH}"
+            echo "image:" >> "${CHART_PATH}"
+            echo "  tag: \"${IMAGE_TAG}\"" >> "${CHART_PATH}"
+          fi
+
+          # Also update image.repository if needed
+          IMAGE_REPO="${{ inputs.gcr_hostname }}/${{ inputs.gcp_project_id }}/${{ inputs.service_name }}"
+          if command -v yq &> /dev/null; then
+            yq eval ".image.repository = \"${IMAGE_REPO}\"" -i "${CHART_PATH}"
+          fi
+
+          # Show changes
+          echo "Updated values.yaml:"
+          cat "${CHART_PATH}"
+
+      - name: Create Pull Request in GitOps Repo
+        id: create-pr
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITOPS_TOKEN || github.token }}
+          path: gitops-repo
+          commit-message: |
+            deploy: update ${{ inputs.service_name }} to ${{ steps.derive-tags.outputs.image_tag }}
+
+            - Image: ${{ steps.build-push.outputs.image_uri }}
+            - Commit: ${{ github.sha }}
+            - Branch: ${{ github.ref_name }}
+          title: "deploy: update ${{ inputs.service_name }} to ${{ steps.derive-tags.outputs.image_tag }}"
+          body: |
+            ## Deployment Update
+
+            **Service:** ${{ inputs.service_name }}
+            **Image Tag:** `${{ steps.derive-tags.outputs.image_tag }}`
+            **Full Image:** `${{ steps.build-push.outputs.image_uri }}`
+
+            ### Changes
+            - **Source Commit:** ${{ github.sha }}
+            - **Source Branch:** ${{ github.ref_name }}
+            - **Triggered By:** ${{ github.actor }}
+            - **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ### Checklist
+            - [ ] Review image tag is correct
+            - [ ] Verify no breaking changes in app
+            - [ ] Check resource limits if changed
+            - [ ] Confirm deployment strategy (rolling/blue-green)
+
+            ### Rollback
+            If issues occur, revert this PR to rollback to previous version.
+          branch: deploy/${{ inputs.service_name }}-${{ steps.derive-tags.outputs.image_tag }}
+          delete-branch: true
+          labels: |
+            deployment
+            automated
+            ${{ github.ref_name == 'main' && 'production' || 'development' }}
+
+      - name: Verify Image in GCR
+        run: |
+          echo "Verifying image in GCR..."
+          gcloud container images list-tags \
+            ${{ inputs.gcr_hostname }}/${{ inputs.gcp_project_id }}/${{ inputs.service_name }} \
+            --filter="tags:${{ steps.derive-tags.outputs.image_tag }}" \
+            --format="table(tags,digest,timestamp.datetime)"
+
+      - name: Calculate Build Duration
+        id: calculate-duration
+        if: always()
+        run: |
+          END_TIME=$(date +%s)
+          START_TIME=${{ steps.build-start.outputs.start_time }}
+          DURATION=$((END_TIME - START_TIME))
+          echo "duration_seconds=${DURATION}" >> $GITHUB_OUTPUT
+          MINUTES=$((DURATION / 60))
+          SECONDS=$((DURATION % 60))
+          echo "duration_formatted=${MINUTES}m ${SECONDS}s" >> $GITHUB_OUTPUT
+
+      - name: Set Deployment Status
+        id: set-deployment-status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          elif [ "${{ job.status }}" = "failure" ]; then
+            echo "status=failure" >> $GITHUB_OUTPUT
+          else
+            echo "status=skipped" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf gitops-repo
+          docker system prune -f --volumes || true
+
+      - name: Summary
+        if: always()
+        run: |
+          STATUS_EMOJI="✅"
+          if [ "${{ job.status }}" = "failure" ]; then
+            STATUS_EMOJI="❌"
+          fi
+
+          echo "## $STATUS_EMOJI CI/CD Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployment Details" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Service** | ${{ inputs.service_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image Tag** | \`${{ steps.derive-tags.outputs.image_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image URI** | \`${{ steps.build-push.outputs.image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | [${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Actor** | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Metadata" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Duration** | ${{ steps.calculate-duration.outputs.duration_formatted }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Semantic Version** | ${{ steps.derive-tags.outputs.is_semantic_version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Start Time** | ${{ steps.build-start.outputs.start_time_iso }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Tags Applied" >> $GITHUB_STEP_SUMMARY
+          echo "- **Primary:** ${{ steps.derive-tags.outputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Additional:** ${{ steps.derive-tags.outputs.additional_tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ steps.create-pr.outputs.pull-request-url }}" ]; then
+            echo "### GitOps Deployment" >> $GITHUB_STEP_SUMMARY
+            echo "- **PR Created:** [${{ steps.create-pr.outputs.pull-request-number }}](${{ steps.create-pr.outputs.pull-request-url }})" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "### Links" >> $GITHUB_STEP_SUMMARY
+          echo "- [View Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY

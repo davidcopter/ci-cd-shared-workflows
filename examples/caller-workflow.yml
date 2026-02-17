@@ -1,0 +1,241 @@
+name: Deploy My Service
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+      - "release/**"
+      - "feature/**"
+    tags:
+      - "v*"
+
+  # Allow manual triggers
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Deployment environment"
+        required: true
+        default: "development"
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+  checks: write
+
+jobs:
+  call-reusable-workflow:
+    uses: ./.github/workflows/ci-cd-template.yml
+    with:
+      # Service Configuration
+      service_name: my-awesome-service
+
+      # Docker Configuration
+      dockerfile_path: "./Dockerfile"
+      docker_build_context: "."
+
+      # GCP Configuration
+      gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
+      gcp_region: us-central1
+      gcr_hostname: gcr.io
+
+      # Workload Identity Configuration
+      # Replace with your actual values after setup
+      workload_identity_provider: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID
+      service_account: github-actions@YOUR_PROJECT_ID.iam.gserviceaccount.com
+
+      # GitOps Configuration
+      gitops_repo: your-org/gitops-repository
+      helm_chart_path: charts/my-awesome-service/values.yaml
+
+      # Build Configuration
+      enable_cache: true
+      platforms: linux/amd64,linux/arm64
+
+    secrets:
+      # Only needed if GitOps repo is private and requires different token
+      GITOPS_TOKEN: ${{ secrets.GITOPS_REPO_TOKEN }}
+
+  # Post-deployment notification job
+  notify-deployment:
+    needs: call-reusable-workflow
+    runs-on: ubuntu-latest
+    if: always()
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Prepare Notification Data
+        id: notification-data
+        run: |
+          STATUS="${{ needs.call-reusable-workflow.result }}"
+          STATUS_EMOJI="✅"
+          STATUS_TEXT="succeeded"
+
+          if [ "$STATUS" = "failure" ]; then
+            STATUS_EMOJI="❌"
+            STATUS_TEXT="failed"
+          elif [ "$STATUS" = "cancelled" ]; then
+            STATUS_EMOJI="⚠️"
+            STATUS_TEXT="was cancelled"
+          fi
+
+          echo "status_emoji=$STATUS_EMOJI" >> $GITHUB_OUTPUT
+          echo "status_text=$STATUS_TEXT" >> $GITHUB_OUTPUT
+
+          # Convert duration to readable format
+          DURATION=${{ needs.call-reusable-workflow.outputs.build_duration_seconds }}
+          MINUTES=$((DURATION / 60))
+          SECONDS=$((DURATION % 60))
+          echo "duration_formatted=${MINUTES}m ${SECONDS}s" >> $GITHUB_OUTPUT
+
+      - name: Create Commit Comment - Deployment Success
+        if: needs.call-reusable-workflow.result == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue_number = context.issue.number;
+            const sha = context.sha;
+            const imageTag = "${{ needs.call-reusable-workflow.outputs.image_tag }}";
+            const imageUri = "${{ needs.call-reusable-workflow.outputs.image_uri }}";
+            const branch = "${{ github.ref_name }}";
+            const actor = "${{ github.actor }}";
+            const duration = "${{ steps.notification-data.outputs.duration_formatted }}";
+            const prUrl = "${{ needs.call-reusable-workflow.outputs.gitops_pr_url }}";
+
+            let comment = `## ✅ Deployment Successful\n\n`;
+            comment += `**Service:** my-awesome-service\n`;
+            comment += `**Triggered by:** @${actor}\n\n`;
+
+            comment += `### Build Details\n`;
+            comment += `| Field | Value |\n`;
+            comment += `|-------|-------|\n`;
+            comment += `| Image Tag | \`${imageTag}\` |\n`;
+            comment += `| Image URI | \`${imageUri}\` |\n`;
+            comment += `| Branch | ${branch} |\n`;
+            comment += `| Commit | ${context.sha.substring(0, 7)} |\n`;
+            comment += `| Duration | ${duration} |\n`;
+            comment += `| Workflow | [View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |\n`;
+
+            if (prUrl) {
+              comment += `\n### GitOps Deployment\n`;
+              comment += `A pull request has been created in the GitOps repository to deploy this image:\n`;
+              comment += `- [View GitOps PR](${prUrl})\n`;
+            }
+
+            comment += `\n### Next Steps\n`;
+            comment += `1. Review and merge the GitOps deployment PR\n`;
+            comment += `2. Monitor the deployment in your target environment\n`;
+            comment += `3. Verify application health and metrics\n`;
+
+            github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: sha,
+              body: comment
+            });
+
+      - name: Create Commit Comment - Deployment Failure
+        if: needs.call-reusable-workflow.result == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = context.sha;
+            const actor = "${{ github.actor }}";
+            const duration = "${{ steps.notification-data.outputs.duration_formatted }}";
+
+            let comment = `## ❌ Deployment Failed\n\n`;
+            comment += `**Service:** my-awesome-service\n`;
+            comment += `**Triggered by:** @${actor}\n`;
+            comment += `**Duration:** ${duration}\n\n`;
+
+            comment += `### Troubleshooting\n`;
+            comment += `1. [View Workflow Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\n`;
+            comment += `2. Check the workflow logs for error details\n`;
+            comment += `3. Review recent commits for potential issues\n`;
+            comment += `4. Check GCP and Docker registry connections\n`;
+            comment += `5. Verify your credentials and permissions\n`;
+
+            comment += `\n### Common Issues\n`;
+            comment += `- Docker authentication failed - verify GCP credentials\n`;
+            comment += `- Build failed - check Dockerfile syntax and dependencies\n`;
+            comment += `- Image push failed - verify GCR access and permissions\n`;
+            comment += `- GitOps PR creation failed - check GitOps repository configuration\n`;
+
+            github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: sha,
+              body: comment
+            });
+
+      - name: Create Job Summary
+        if: always()
+        run: |
+          STATUS_EMOJI="${{ steps.notification-data.outputs.status_emoji }}"
+          STATUS_TEXT="${{ steps.notification-data.outputs.status_text }}"
+          DURATION="${{ steps.notification-data.outputs.duration_formatted }}"
+
+          echo "## $STATUS_EMOJI Deployment $STATUS_TEXT" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image Tag** | \`${{ needs.call-reusable-workflow.outputs.image_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image URI** | \`${{ needs.call-reusable-workflow.outputs.image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ${{ needs.call-reusable-workflow.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Duration** | $DURATION |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Links" >> $GITHUB_STEP_SUMMARY
+          echo "- [Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ needs.call-reusable-workflow.outputs.gitops_pr_url }}" ]; then
+            echo "- [GitOps PR](${{ needs.call-reusable-workflow.outputs.gitops_pr_url }})" >> $GITHUB_STEP_SUMMARY
+          fi
+
+
+# Example with multiple services
+---
+name: Deploy Multiple Services
+
+on:
+  push:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-api:
+    uses: your-org/github-actions-shared-workflows/.github/workflows/ci-cd-template.yml@main
+    with:
+      service_name: api-service
+      dockerfile_path: "./services/api/Dockerfile"
+      docker_build_context: "./services/api"
+      gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
+      workload_identity_provider: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID
+      service_account: github-actions@YOUR_PROJECT_ID.iam.gserviceaccount.com
+      gitops_repo: your-org/gitops-repository
+      helm_chart_path: charts/api-service/values.yaml
+
+  deploy-frontend:
+    uses: your-org/github-actions-shared-workflows/.github/workflows/ci-cd-template.yml@main
+    with:
+      service_name: frontend-service
+      dockerfile_path: "./services/frontend/Dockerfile"
+      docker_build_context: "./services/frontend"
+      gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
+      workload_identity_provider: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID
+      service_account: github-actions@YOUR_PROJECT_ID.iam.gserviceaccount.com
+      gitops_repo: your-org/gitops-repository
+      helm_chart_path: charts/frontend-service/values.yaml
+      platforms: linux/amd64 # Frontend might not need ARM
