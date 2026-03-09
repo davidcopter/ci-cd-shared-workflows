@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     permissions:
-      contents: read
+      contents: write
       pull-requests: read
 
     steps:
