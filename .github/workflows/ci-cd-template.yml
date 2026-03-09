@@ -36,6 +36,11 @@ on:
         type: string
         default: "linux/amd64,linux/arm64"
 
+    secrets:
+      GITOPS_TOKEN:
+        description: "GitHub token for GitOps repository access (optional)"
+        required: false
+
     outputs:
       image_tag:
         description: "Generated image tag"
