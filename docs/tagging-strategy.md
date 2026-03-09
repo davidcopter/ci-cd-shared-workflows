@@ -33,7 +33,7 @@ latest_tag=$(git describe --tags --abbrev=0)  # e.g., "v1.2.3"
 **Helm Values Update:**
 ```yaml
 image:
-  repository: gcr.io/project/service
+  repository: ghcr.io/owner/service
   tag: "1.2.4"
   pullPolicy: IfNotPresent
 ```
@@ -273,7 +273,7 @@ parse_semver() {
 ```yaml
 # charts/my-service/values.yaml
 image:
-  repository: gcr.io/project-id/my-service
+  repository: ghcr.io/owner/my-service
   tag: ""  # Updated by CI/CD
   pullPolicy: IfNotPresent
 
@@ -290,7 +290,7 @@ image:
 ### GitOps Update Process
 
 1. **Build** image with derived tags
-2. **Push** to GCR
+2. **Push** to GHCR
 3. **Checkout** GitOps repository
 4. **Update** `image.tag` in Helm values
 5. **Create** PR with deployment details
@@ -304,7 +304,7 @@ image:
 
 **Service:** my-service
 **Image Tag:** `1.2.4`
-**Full Image:** `gcr.io/project/my-service:1.2.4`
+**Full Image:** `ghcr.io/owner/my-service:1.2.4`
 
 ### Changes
 - **Source Commit:** abc1234567890abcdef1234567890abcdef123456

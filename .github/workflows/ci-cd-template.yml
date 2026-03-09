@@ -17,28 +17,6 @@ on:
         required: false
         type: string
         default: "."
-      gcp_project_id:
-        description: "GCP Project ID"
-        required: true
-        type: string
-      gcp_region:
-        description: "GCP Region for GCR"
-        required: false
-        type: string
-        default: "us-central1"
-      gcr_hostname:
-        description: "GCR hostname"
-        required: false
-        type: string
-        default: "gcr.io"
-      workload_identity_provider:
-        description: "GCP Workload Identity Provider"
-        required: true
-        type: string
-      service_account:
-        description: "GCP Service Account email"
-        required: true
-        type: string
       gitops_repo:
         description: "GitOps repository (owner/repo)"
         required: true
@@ -83,14 +61,15 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+  packages: write
+  pull-requests: write
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.derive-tags.outputs.image_tag }}
-      image_uri: ${{ steps.build-push.outputs.image_uri }}
+      image_uri: ${{ steps.image-uri.outputs.image_uri }}
       is_semantic_version: ${{ steps.derive-tags.outputs.is_semantic_version }}
       deployment_status: ${{ steps.set-deployment-status.outputs.status }}
       build_duration_seconds: ${{ steps.calculate-duration.outputs.duration_seconds }}
@@ -109,25 +88,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Authenticate to Google Cloud
-        id: auth
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ inputs.workload_identity_provider }}
-          service_account: ${{ inputs.service_account }}
-          token_format: access_token
-
-      - name: Setup GCloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ inputs.gcp_project_id }}
-
-      - name: Configure Docker for GCR
-        run: |
-          gcloud auth configure-docker ${{ inputs.gcr_hostname }} --quiet
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -228,7 +197,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ inputs.gcr_hostname }}/${{ inputs.gcp_project_id }}/${{ inputs.service_name }}
+            ghcr.io/${{ github.repository_owner }}/${{ inputs.service_name }}
           tags: |
             type=raw,value=${{ steps.derive-tags.outputs.image_tag }}
             ${{ steps.derive-tags.outputs.additional_tags && format('type=raw,value={0}', steps.derive-tags.outputs.additional_tags) || '' }}
@@ -245,10 +214,10 @@ jobs:
           platforms: ${{ inputs.platforms }}
           cache-from: |
             type=gha,scope=${{ inputs.service_name }}
-            type=registry,ref=${{ inputs.gcr_hostname }}/${{ inputs.gcp_project_id }}/${{ inputs.service_name }}:buildcache
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ inputs.service_name }}:buildcache
           cache-to: |
             type=gha,scope=${{ inputs.service_name }},mode=max
-            type=registry,ref=${{ inputs.gcr_hostname }}/${{ inputs.gcp_project_id }}/${{ inputs.service_name }}:buildcache,mode=max
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ inputs.service_name }}:buildcache,mode=max
           build-args: |
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             VCS_REF=${{ github.sha }}
@@ -257,7 +226,7 @@ jobs:
       - name: Output Image URI
         id: image-uri
         run: |
-          IMAGE_URI="${{ inputs.gcr_hostname }}/${{ inputs.gcp_project_id }}/${{ inputs.service_name }}:${{ steps.derive-tags.outputs.image_tag }}"
+          IMAGE_URI="ghcr.io/${{ github.repository_owner }}/${{ inputs.service_name }}:${{ steps.derive-tags.outputs.image_tag }}"
           echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "Built and pushed: ${IMAGE_URI}"
 
@@ -305,7 +274,7 @@ jobs:
           fi
 
           # Also update image.repository if needed
-          IMAGE_REPO="${{ inputs.gcr_hostname }}/${{ inputs.gcp_project_id }}/${{ inputs.service_name }}"
+          IMAGE_REPO="ghcr.io/${{ github.repository_owner }}/${{ inputs.service_name }}"
           if command -v yq &> /dev/null; then
             yq eval ".image.repository = \"${IMAGE_REPO}\"" -i "${CHART_PATH}"
           fi
@@ -323,7 +292,7 @@ jobs:
           commit-message: |
             deploy: update ${{ inputs.service_name }} to ${{ steps.derive-tags.outputs.image_tag }}
 
-            - Image: ${{ steps.build-push.outputs.image_uri }}
+            - Image: ${{ steps.image-uri.outputs.image_uri }}
             - Commit: ${{ github.sha }}
             - Branch: ${{ github.ref_name }}
           title: "deploy: update ${{ inputs.service_name }} to ${{ steps.derive-tags.outputs.image_tag }}"
@@ -332,7 +301,7 @@ jobs:
 
             **Service:** ${{ inputs.service_name }}
             **Image Tag:** `${{ steps.derive-tags.outputs.image_tag }}`
-            **Full Image:** `${{ steps.build-push.outputs.image_uri }}`
+            **Full Image:** `${{ steps.image-uri.outputs.image_uri }}`
 
             ### Changes
             - **Source Commit:** ${{ github.sha }}
@@ -355,13 +324,10 @@ jobs:
             automated
             ${{ github.ref_name == 'main' && 'production' || 'development' }}
 
-      - name: Verify Image in GCR
+      - name: Verify Image in GHCR
         run: |
-          echo "Verifying image in GCR..."
-          gcloud container images list-tags \
-            ${{ inputs.gcr_hostname }}/${{ inputs.gcp_project_id }}/${{ inputs.service_name }} \
-            --filter="tags:${{ steps.derive-tags.outputs.image_tag }}" \
-            --format="table(tags,digest,timestamp.datetime)"
+          echo "Verifying image in GHCR..."
+          docker manifest inspect ghcr.io/${{ github.repository_owner }}/${{ inputs.service_name }}:${{ steps.derive-tags.outputs.image_tag }}
 
       - name: Calculate Build Duration
         id: calculate-duration
@@ -408,7 +374,7 @@ jobs:
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| **Service** | ${{ inputs.service_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Image Tag** | \`${{ steps.derive-tags.outputs.image_tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Image URI** | \`${{ steps.build-push.outputs.image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image URI** | \`${{ steps.image-uri.outputs.image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Commit** | [${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}) |" >> $GITHUB_STEP_SUMMARY
           echo "| **Actor** | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY

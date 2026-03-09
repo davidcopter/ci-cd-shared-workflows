@@ -30,15 +30,15 @@ make lint
 
 ## Architecture
 
-This repository is a **shared GitHub Actions reusable workflow** for container deployments to GCP. Caller repositories reference `.github/workflows/ci-cd-template.yml` via `workflow_call`.
+This repository is a **shared GitHub Actions reusable workflow** for container deployments using GitHub Container Registry (GHCR). Caller repositories reference `.github/workflows/ci-cd-template.yml` via `workflow_call`.
 
 ### Pipeline Flow
 
 The single `build-and-deploy` job in `ci-cd-template.yml` runs these steps in sequence:
 
 1. **Derive Image Tags** — inline bash logic (mirrors `scripts/derive-tags.sh`) determines Docker tags from the Git ref
-2. **Auth to GCP** — OIDC via Workload Identity Federation (`google-github-actions/auth@v2`), no static keys
-3. **Build & Push** — Docker Buildx multi-platform build pushed to GCR with dual caching (GitHub Actions cache + GCR registry cache)
+2. **Login to GHCR** — authenticates to `ghcr.io` via `GITHUB_TOKEN` (requires `packages: write` in caller permissions)
+3. **Build & Push** — Docker Buildx multi-platform build pushed to GHCR (`ghcr.io/<owner>/<service>`) with dual caching (GitHub Actions cache + GHCR registry cache)
 4. **Update GitOps Repo** — checks out the caller's GitOps repo, updates `image.tag` in the Helm `values.yaml` using `yq` (or `sed` as fallback)
 5. **Create PR** — `peter-evans/create-pull-request@v5` opens a PR on the GitOps repo; ArgoCD/Flux then picks up the change
 
@@ -54,11 +54,17 @@ The script is the source of truth for tag derivation (the workflow inlines equiv
 | feature/other | `sanitized-branch-SHA7` | Branch truncated to 43 chars; total tag ≤ 50 chars |
 | git tags | tag value (strips `v` prefix) | Adds `latest` for non-pre-release tags |
 
-### Required GitHub Variables (in caller repos)
+### Required Caller Permissions
 
-- `GCP_PROJECT_ID` — GCP project ID
-- `WORKLOAD_IDENTITY_PROVIDER` — full resource path to the WIF provider
-- `SERVICE_ACCOUNT` — `github-actions@PROJECT_ID.iam.gserviceaccount.com`
+The caller workflow must declare:
+```yaml
+permissions:
+  contents: read
+  packages: write      # Required for GHCR push
+  pull-requests: write # Required for GitOps PRs
+```
+
+No GitHub variables or secrets required for registry auth — `GITHUB_TOKEN` is used automatically.
 
 Optional secret: `GITOPS_TOKEN` — only needed when the GitOps repo is in a different org or requires explicit token permissions; falls back to `github.token`.
 
@@ -68,7 +74,7 @@ The workflow expects this structure in the GitOps repo's `values.yaml`:
 
 ```yaml
 image:
-  repository: gcr.io/project-id/service-name
+  repository: ghcr.io/<owner>/service-name
   tag: ""   # updated by the workflow
 ```
 
@@ -77,14 +83,16 @@ If the `image:` key is absent, it is appended. The workflow uses `yq` when avail
 ### Caller Workflow Pattern
 
 ```yaml
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
+
 jobs:
   deploy:
     uses: org/ci-cd-shared-workflows/.github/workflows/ci-cd-template.yml@main
     with:
       service_name: my-service
-      gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
-      workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
-      service_account: ${{ vars.SERVICE_ACCOUNT }}
       gitops_repo: org/gitops-repo
       helm_chart_path: charts/my-service/values.yaml
 ```

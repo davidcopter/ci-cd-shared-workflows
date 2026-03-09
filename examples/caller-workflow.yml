@@ -26,7 +26,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+  packages: write
   pull-requests: write
   checks: write
 
@@ -40,16 +40,6 @@ jobs:
       # Docker Configuration
       dockerfile_path: "./Dockerfile"
       docker_build_context: "."
-
-      # GCP Configuration
-      gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
-      gcp_region: us-central1
-      gcr_hostname: gcr.io
-
-      # Workload Identity Configuration
-      # Replace with your actual values after setup
-      workload_identity_provider: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID
-      service_account: github-actions@YOUR_PROJECT_ID.iam.gserviceaccount.com
 
       # GitOps Configuration
       gitops_repo: your-org/gitops-repository
@@ -161,13 +151,13 @@ jobs:
             comment += `1. [View Workflow Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\n`;
             comment += `2. Check the workflow logs for error details\n`;
             comment += `3. Review recent commits for potential issues\n`;
-            comment += `4. Check GCP and Docker registry connections\n`;
+            comment += `4. Check GHCR and Docker registry connections\n`;
             comment += `5. Verify your credentials and permissions\n`;
 
             comment += `\n### Common Issues\n`;
-            comment += `- Docker authentication failed - verify GCP credentials\n`;
+            comment += `- Docker authentication failed - verify GITHUB_TOKEN has packages: write permission\n`;
             comment += `- Build failed - check Dockerfile syntax and dependencies\n`;
-            comment += `- Image push failed - verify GCR access and permissions\n`;
+            comment += `- Image push failed - verify GHCR package visibility and permissions\n`;
             comment += `- GitOps PR creation failed - check GitOps repository configuration\n`;
 
             github.rest.repos.createCommitComment({
@@ -212,7 +202,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+  packages: write
 
 jobs:
   deploy-api:
@@ -221,9 +211,6 @@ jobs:
       service_name: api-service
       dockerfile_path: "./services/api/Dockerfile"
       docker_build_context: "./services/api"
-      gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
-      workload_identity_provider: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID
-      service_account: github-actions@YOUR_PROJECT_ID.iam.gserviceaccount.com
       gitops_repo: your-org/gitops-repository
       helm_chart_path: charts/api-service/values.yaml
 
@@ -233,9 +220,6 @@ jobs:
       service_name: frontend-service
       dockerfile_path: "./services/frontend/Dockerfile"
       docker_build_context: "./services/frontend"
-      gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
-      workload_identity_provider: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID
-      service_account: github-actions@YOUR_PROJECT_ID.iam.gserviceaccount.com
       gitops_repo: your-org/gitops-repository
       helm_chart_path: charts/frontend-service/values.yaml
       platforms: linux/amd64 # Frontend might not need ARM

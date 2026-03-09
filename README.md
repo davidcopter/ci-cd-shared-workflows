@@ -1,53 +1,32 @@
 # CI/CD Shared Workflows
 
-Production-ready, reusable GitHub Actions workflows for container image deployment with dynamic tagging and Workload Identity Federation.
+Production-ready, reusable GitHub Actions workflows for container image deployment with dynamic tagging and GitHub Container Registry.
 
 ## Features
 
-✅ **Reusable Workflow** - Single template used across multiple services  
-✅ **Dynamic Tagging** - Semantic versioning, release candidates, and feature branch tags  
-✅ **Workload Identity Federation** - OIDC-based GCP authentication (no static keys)  
-✅ **Docker Buildx** - Multi-platform builds with intelligent layer caching  
-✅ **Helm GitOps** - Automated PRs to update Helm chart values  
-✅ **Security Hardened** - Non-root containers, minimal permissions, audit logging
+✅ **Reusable Workflow** - Single template used across multiple services
+✅ **Dynamic Tagging** - Semantic versioning, release candidates, and feature branch tags
+✅ **GHCR Authentication** - Automatic via `GITHUB_TOKEN` — no cloud credentials needed
+✅ **Docker Buildx** - Multi-platform builds with intelligent layer caching
+✅ **Helm GitOps** - Automated PRs to update Helm chart values
+✅ **Security Hardened** - Non-root containers, minimal permissions, short-lived tokens
 
 ## Quick Start
 
-### 1. Set Up Workload Identity Federation
+### 1. Set Up GHCR Authentication
 
-Follow the [setup guide](docs/setup-workload-identity.md) to configure GCP authentication.
+No external setup required. GitHub Container Registry authenticates automatically via `GITHUB_TOKEN`.
 
-**Quick Commands:**
+Simply add `packages: write` to your caller workflow permissions:
 
-```bash
-# Set variables
-export PROJECT_ID="your-project-id"
-export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
-
-# Create pool and provider
-gcloud iam workload-identity-pools create "github-pool" --project="${PROJECT_ID}" --location="global"
-
-gcloud iam workload-identity-pools providers create-oidc "github-provider" \
-    --project="${PROJECT_ID}" \
-    --location="global" \
-    --workload-identity-pool="github-pool" \
-    --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
-    --issuer-uri="https://token.actions.githubusercontent.com"
-
-# Create service account
-gcloud iam service-accounts create github-actions --display-name="GitHub Actions"
-
-# Grant permissions
-gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-    --member="serviceAccount:github-actions@${PROJECT_ID}.iam.gserviceaccount.com" \
-    --role="roles/storage.admin"
-
-# Allow GitHub to impersonate SA
-gcloud iam service-accounts add-iam-policy-binding \
-    github-actions@${PROJECT_ID}.iam.gserviceaccount.com \
-    --role="roles/iam.workloadIdentityUser" \
-    --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-pool/attribute.repository/YOUR_ORG/YOUR_REPO"
+```yaml
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
 ```
+
+See [GHCR setup guide](docs/setup-ghcr.md) for package visibility settings and cross-org access.
 
 ### 2. Use the Reusable Workflow
 
@@ -63,16 +42,14 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+  packages: write
+  pull-requests: write
 
 jobs:
   deploy:
     uses: davidcopter/ci-cd-shared-workflows/.github/workflows/ci-cd-template.yml@main
     with:
       service_name: my-service
-      gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
-      workload_identity_provider: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider
-      service_account: github-actions@YOUR_PROJECT_ID.iam.gserviceaccount.com
       gitops_repo: your-org/gitops-repository
       helm_chart_path: charts/my-service/values.yaml
 ```
@@ -111,7 +88,7 @@ gitops-repository/
 │  │                     Reusable Workflow                                │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐              │   │
 │  │  │  Derive Tags │  │ Build & Push │  │ Update       │              │   │
-│  │  │  (dynamic)   │→ │ to GCR       │→ │ GitOps Repo  │              │   │
+│  │  │  (dynamic)   │→ │ to GHCR      │→ │ GitOps Repo  │              │   │
 │  │  └──────────────┘  └──────────────┘  └──────────────┘              │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────┬──────────────────────────────────────────┘
@@ -120,10 +97,10 @@ gitops-repository/
                     │                             │
                     ▼                             ▼
         ┌──────────────────────┐      ┌──────────────────────┐
-        │   Google Cloud       │      │   GitOps Repository  │
+        │   GitHub             │      │   GitOps Repository  │
         │   ┌────────────────┐ │      │   ┌────────────────┐ │
         │   │ Container      │ │      │   │ Helm Values    │ │
-        │   │ Registry (GCR) │ │      │   │ Updated by PR  │ │
+        │   │ Registry(GHCR) │ │      │   │ Updated by PR  │ │
         │   └────────────────┘ │      │   └────────────────┘ │
         └──────────────────────┘      └──────────────────────┘
                                                    │
@@ -162,27 +139,22 @@ ci-cd-shared-workflows/
 ├── scripts/
 │   └── derive-tags.sh                  # Tag derivation logic
 ├── docs/
-│   ├── setup-workload-identity.md      # GCP OIDC setup
+│   ├── setup-ghcr.md                   # GHCR authentication setup
 │   └── tagging-strategy.md             # Tagging documentation
 └── README.md                           # This file
 ```
 
 ## Workflow Inputs
 
-| Input                        | Required | Default                   | Description                          |
-| ---------------------------- | -------- | ------------------------- | ------------------------------------ |
-| `service_name`               | ✅       | -                         | Service name (used for image naming) |
-| `dockerfile_path`            | ❌       | `./Dockerfile`            | Path to Dockerfile                   |
-| `docker_build_context`       | ❌       | `.`                       | Docker build context                 |
-| `gcp_project_id`             | ✅       | -                         | GCP project ID                       |
-| `gcp_region`                 | ❌       | `us-central1`             | GCP region                           |
-| `gcr_hostname`               | ❌       | `gcr.io`                  | GCR hostname                         |
-| `workload_identity_provider` | ✅       | -                         | Workload Identity Provider resource  |
-| `service_account`            | ✅       | -                         | GCP service account email            |
-| `gitops_repo`                | ✅       | -                         | GitOps repo (owner/repo)             |
-| `helm_chart_path`            | ✅       | -                         | Path to values.yaml in GitOps repo   |
-| `enable_cache`               | ❌       | `true`                    | Enable Docker layer caching          |
-| `platforms`                  | ❌       | `linux/amd64,linux/arm64` | Target platforms                     |
+| Input                  | Required | Default                   | Description                          |
+| ---------------------- | -------- | ------------------------- | ------------------------------------ |
+| `service_name`         | ✅       | -                         | Service name (used for image naming) |
+| `dockerfile_path`      | ❌       | `./Dockerfile`            | Path to Dockerfile                   |
+| `docker_build_context` | ❌       | `.`                       | Docker build context                 |
+| `gitops_repo`          | ✅       | -                         | GitOps repo (owner/repo)             |
+| `helm_chart_path`      | ✅       | -                         | Path to values.yaml in GitOps repo   |
+| `enable_cache`         | ❌       | `true`                    | Enable Docker layer caching          |
+| `platforms`            | ❌       | `linux/amd64,linux/arm64` | Target platforms                     |
 
 ## Workflow Outputs
 
@@ -207,7 +179,7 @@ All deployment data is exported as workflow outputs and job summaries:
 ```yaml
 # From template job
 image_tag: 1.2.4
-image_uri: gcr.io/project/service:1.2.4
+image_uri: ghcr.io/owner/service:1.2.4
 is_semantic_version: true
 deployment_status: success
 build_duration_seconds: 245
@@ -228,7 +200,7 @@ Each workflow run automatically generates a detailed summary visible in the work
 | --------- | --------------------------------- |
 | Service   | my-service                        |
 | Image Tag | `1.2.4`                           |
-| Image URI | `gcr.io/project/my-service:1.2.4` |
+| Image URI | `ghcr.io/owner/my-service:1.2.4` |
 | Branch    | main                              |
 | Commit    | abc1234                           |
 | Actor     | user                              |
@@ -273,7 +245,7 @@ Triggered by: @developer-name
 | Field     | Value                          |
 | --------- | ------------------------------ |
 | Image Tag | `1.2.4`                        |
-| Image URI | `gcr.io/project/service:1.2.4` |
+| Image URI | `ghcr.io/owner/service:1.2.4` |
 | Branch    | main                           |
 | Commit    | abc1234                        |
 | Duration  | 4m 5s                          |
@@ -389,12 +361,12 @@ if: always()
 if: needs.call-reusable-workflow.result != 'cancelled'
 ```
 
-### Workload Identity Federation
+### GHCR Authentication
 
-- ✅ **No static service account keys** stored in GitHub
-- ✅ **Short-lived tokens** (1 hour default)
-- ✅ **OIDC-based authentication** via GitHub's identity provider
-- ✅ **Fine-grained repository access** through attribute conditions
+- ✅ **No static credentials** stored anywhere
+- ✅ **Short-lived tokens** that expire when the workflow run completes
+- ✅ **Automatic authentication** via `GITHUB_TOKEN`
+- ✅ **Fine-grained access** governed by GitHub's permission model
 
 ### Docker Security
 
@@ -408,9 +380,9 @@ if: needs.call-reusable-workflow.result != 'cancelled'
 
 ```yaml
 permissions:
-  contents: read # Only read repository contents
-  id-token: write # Required for OIDC token exchange
-  pull-requests: write # Required for creating GitOps PRs
+  contents: read        # Only read repository contents
+  packages: write       # Required for GHCR push
+  pull-requests: write  # Required for creating GitOps PRs
 ```
 
 ## Example: Multiple Services
@@ -431,9 +403,6 @@ jobs:
       service_name: api-service
       dockerfile_path: ./services/api/Dockerfile
       docker_build_context: ./services/api
-      gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
-      workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
-      service_account: ${{ vars.SERVICE_ACCOUNT }}
       gitops_repo: your-org/gitops-repository
       helm_chart_path: charts/api-service/values.yaml
 
@@ -443,9 +412,6 @@ jobs:
       service_name: frontend-service
       dockerfile_path: ./services/frontend/Dockerfile
       docker_build_context: ./services/frontend
-      gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
-      workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
-      service_account: ${{ vars.SERVICE_ACCOUNT }}
       gitops_repo: your-org/gitops-repository
       helm_chart_path: charts/frontend-service/values.yaml
       platforms: linux/amd64 # Frontend may not need ARM
@@ -461,7 +427,7 @@ The workflow implements a **dual caching strategy**:
 - **Persistence:** 7 days (GitHub default)
 - **Use case:** Speed up repeated builds in same PR
 
-### 2. GCR Registry Cache
+### 2. GHCR Registry Cache
 
 - **Scope:** Shared across all builds
 - **Persistence:** Until manually deleted
@@ -470,10 +436,10 @@ The workflow implements a **dual caching strategy**:
 ```yaml
 cache-from: |
   type=gha,scope=${{ inputs.service_name }}
-  type=registry,ref=gcr.io/project/service:buildcache
+  type=registry,ref=ghcr.io/owner/service:buildcache
 cache-to: |
   type=gha,scope=${{ inputs.service_name }},mode=max
-  type=registry,ref=gcr.io/project/service:buildcache,mode=max
+  type=registry,ref=ghcr.io/owner/service:buildcache,mode=max
 ```
 
 ## Monitoring & Observability
@@ -487,7 +453,7 @@ Each run generates a detailed summary:
 
 **Service:** my-service
 **Image Tag:** 1.2.4
-**Image URI:** gcr.io/project/my-service:1.2.4
+**Image URI:** ghcr.io/owner/my-service:1.2.4
 **Semantic Version:** true
 **Branch:** main
 
@@ -511,20 +477,13 @@ Automated PRs include:
 
 ## Troubleshooting
 
-### "Permission denied" on GCR push
+### "denied: permission_denied: write_package" on GHCR push
 
-```bash
-# Verify service account has storage.admin role
-gcloud projects get-iam-policy $PROJECT_ID \
-    --flatten="bindings[].members" \
-    --filter="bindings.members:github-actions@"
-```
+Ensure `packages: write` is in your caller workflow's `permissions` block. Reusable workflows inherit permissions from the caller.
 
-### "Failed to fetch access token"
+### "unauthorized: authentication required"
 
-1. Verify Workload Identity Provider exists
-2. Check attribute mapping is correct
-3. Ensure repository matches allowed repositories
+The `GITHUB_TOKEN` is scoped to the triggering repository. For cross-org pushes, use a PAT with `write:packages` scope stored as a secret.
 
 ### Tags not derived correctly
 
@@ -555,7 +514,7 @@ env:
 2. **Store sensitive values in repository secrets/vars**:
 
    ```yaml
-   gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
+   gitops_repo: ${{ vars.GITOPS_REPO }}
    ```
 
 3. **Enable branch protection** for main branch
@@ -567,7 +526,7 @@ env:
    - Or integrate with Slack, Teams, Discord using the exported outputs
    - See [Notifications](#notifications) section for examples
 
-6. **Monitor GCR storage costs** (cache images can grow large)
+6. **Monitor GHCR storage** (cache images can grow large; free tier has limits)
 
 ## Secrets & Variables Setup
 
@@ -577,30 +536,13 @@ This section lists all GitHub repository variables and secrets needed for the CI
 
 Repository variables are set at **Settings → Secrets and variables → Variables**.
 
-| Variable                     | Required | Description                                              | Where to Get                                                                                                                                                                                                                                                                                           |
-| ---------------------------- | -------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GCP_PROJECT_ID`             | ✅       | Your Google Cloud project ID                             | 1. Go to [Google Cloud Console](https://console.cloud.google.com)<br/>2. Click project dropdown at top<br/>3. Copy your **Project ID** (not Project Number)                                                                                                                                            |
-| `WORKLOAD_IDENTITY_PROVIDER` | ✅       | Full resource path to Workload Identity Provider         | 1. Run: `gcloud iam workload-identity-pools describe github-pool --project=$PROJECT_ID --location=global --format="value(name)"`<br/>2. Then append `/providers/github-provider`<br/>3. Format: `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider` |
-| `SERVICE_ACCOUNT`            | ✅       | GCP service account email for GitHub Actions             | 1. Go to [GCP Service Accounts](https://console.cloud.google.com/iam-admin/serviceaccounts)<br/>2. Find `github-actions` service account<br/>3. Copy email (format: `github-actions@PROJECT_ID.iam.gserviceaccount.com`)                                                                               |
-| `SLACK_WEBHOOK`              | ❌       | Slack webhook URL for notifications (optional)           | 1. Go to your Slack workspace<br/>2. Create incoming webhook: https://api.slack.com/messaging/webhooks<br/>3. Configure & copy webhook URL                                                                                                                                                             |
-| `TEAMS_WEBHOOK`              | ❌       | Microsoft Teams webhook URL for notifications (optional) | 1. Go to Microsoft Teams channel<br/>2. Click `⋯` (More options) → Connectors<br/>3. Search "Incoming Webhook"<br/>4. Configure & copy webhook URL                                                                                                                                                     |
-| `DISCORD_WEBHOOK`            | ❌       | Discord webhook URL for notifications (optional)         | 1. Go to Discord server settings → Integrations → Webhooks<br/>2. Create New Webhook<br/>3. Copy webhook URL                                                                                                                                                                                           |
+No required variables — GHCR authentication is handled automatically via `GITHUB_TOKEN`.
 
-**How to set variables:**
-
-```bash
-# Using GitHub CLI
-gh variable set GCP_PROJECT_ID --body "your-project-id" -R org/your-repo
-gh variable set WORKLOAD_IDENTITY_PROVIDER --body "projects/123456/..." -R org/your-repo
-gh variable set SERVICE_ACCOUNT --body "github-actions@your-project.iam.gserviceaccount.com" -R org/your-repo
-```
-
-Or via GitHub UI:
-
-1. Go to repository **Settings → Secrets and variables → Variables**
-2. Click "New repository variable"
-3. Enter Name and Value
-4. Click "Add variable"
+| Variable         | Required | Description                                              | Where to Get                                                                                                                                                                     |
+| ---------------- | -------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SLACK_WEBHOOK`  | ❌       | Slack webhook URL for notifications (optional)           | 1. Go to your Slack workspace<br/>2. Create incoming webhook: https://api.slack.com/messaging/webhooks<br/>3. Configure & copy webhook URL                                       |
+| `TEAMS_WEBHOOK`  | ❌       | Microsoft Teams webhook URL for notifications (optional) | 1. Go to Microsoft Teams channel<br/>2. Click `⋯` (More options) → Connectors<br/>3. Search "Incoming Webhook"<br/>4. Configure & copy webhook URL                               |
+| `DISCORD_WEBHOOK`| ❌       | Discord webhook URL for notifications (optional)         | 1. Go to Discord server settings → Integrations → Webhooks<br/>2. Create New Webhook<br/>3. Copy webhook URL                                                                    |
 
 ### Repository Secrets (Sensitive)
 
@@ -632,50 +574,17 @@ Or via GitHub UI:
 
 Verify your setup before running workflows:
 
-- [ ] **GCP Project**: Confirm project ID in [Google Cloud Console](https://console.cloud.google.com)
-- [ ] **Service Account**: Verify at [GCP Service Accounts](https://console.cloud.google.com/iam-admin/serviceaccounts) with roles:
-  - `roles/iam.serviceAccountUser` - To use the service account
-  - `roles/storage.admin` - To push to GCR
-  - `roles/container.developer` - To access Container Registry
-- [ ] **Workload Identity**: Confirm pool/provider exists:
-  ```bash
-  gcloud iam workload-identity-pools list \
-    --project=$GCP_PROJECT_ID \
-    --location=global \
-    --format="table(name,state)"
-  ```
-- [ ] **Service Account Binding**: Verify GitHub can impersonate it:
-  ```bash
-  gcloud iam service-accounts get-iam-policy \
-    github-actions@$GCP_PROJECT_ID.iam.gserviceaccount.com \
-    --format="table(bindings[].members[])"
-  ```
-- [ ] **GitHub Variables**: Check all 3 required variables are set at `Settings → Secrets and variables → Variables`
-- [ ] **GCR Bucket**: Ensure GCR repository is accessible:
-  ```bash
-  gcloud container images list --project=$GCP_PROJECT_ID
-  ```
+- [ ] **Workflow Permissions**: Confirm `packages: write` is in your caller workflow's `permissions` block
 - [ ] **GitOps Repo**: Verify write access to the GitOps repository
+- [ ] **GITOPS_TOKEN** (if needed): Set at `Settings → Secrets and variables → Secrets` if GitOps repo is in a different org
 - [ ] **Notifications** (Optional): Test webhook URLs if setting up Slack/Teams/Discord
 
 ### Troubleshooting Secrets & Variables
 
-**Error: "Unable to resolve variable"**
+**Error: "denied: permission_denied: write_package"**
 
-- Variable name is case-sensitive
-- Ensure variable is in the correct repository (not organization-level)
-- Verify at **Settings → Secrets and variables → Variables**
-
-**Error: "Failed to fetch access token"**
-
-- `WORKLOAD_IDENTITY_PROVIDER` is incorrect or expired
-- Service account not properly bound to GitHub identity pool
-- Repository name doesn't match the binding condition
-
-**Error: "Permission denied" on GCR push**
-
-- Service account missing `roles/storage.admin` role
-- Verify: `gcloud projects get-iam-policy $PROJECT_ID --flatten="bindings[].members" --filter="bindings.members:github-actions@"`
+- Add `packages: write` to your caller workflow's `permissions` block
+- Reusable workflows inherit permissions from the caller — the caller must grant this explicitly
 
 **Error: "403 Forbidden" on GitOps repo**
 
@@ -696,19 +605,18 @@ Verify your setup before running workflows:
 
 ## Migration Guide
 
-### From Static Service Account Keys
+### From GCR (Google Container Registry)
 
-1. Remove `GCP_SA_KEY` secret from GitHub
-2. Follow [Workload Identity setup](docs/setup-workload-identity.md)
-3. Update workflow to use OIDC authentication
-4. Delete old service account keys from GCP
+1. Remove `gcp_project_id`, `workload_identity_provider`, `service_account` from your caller workflow `with:` block
+2. Replace `id-token: write` permission with `packages: write`
+3. Update Helm values `image.repository` from `gcr.io/project/service` to `ghcr.io/owner/service`
+4. Migrate existing images if needed (optional — new builds will push to GHCR automatically)
 
 ### From Docker Hub
 
-1. Update `gcr_hostname` to `gcr.io`
-2. Ensure GCR repository exists in GCP
-3. Update image references in Helm charts
-4. Migrate existing images if needed
+1. Remove Docker Hub credentials from GitHub secrets
+2. Add `packages: write` to your workflow permissions
+3. Update image references in Helm charts to `ghcr.io/owner/service`
 
 ## Contributing
 
@@ -724,7 +632,7 @@ MIT License - see LICENSE file for details
 
 ## Support
 
-- 📖 [Workload Identity Setup](docs/setup-workload-identity.md)
+- 📖 [GHCR Setup](docs/setup-ghcr.md)
 - 🏷️ [Tagging Strategy](docs/tagging-strategy.md)
 - 🐛 [Open an Issue](../../issues)
 - 💬 [Discussions](../../discussions)
@@ -732,7 +640,7 @@ MIT License - see LICENSE file for details
 ## References
 
 - [GitHub Actions Reusable Workflows](https://docs.github.com/en/actions/using-workflows/reusing-workflows)
-- [Google Cloud Workload Identity](https://cloud.google.com/iam/docs/workload-identity-federation)
+- [GitHub Container Registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
 - [Docker Buildx](https://docs.docker.com/buildx/working-with-buildx/)
 - [Semantic Versioning](https://semver.org/)
 - [GitOps with Helm](https://helm.sh/docs/)
