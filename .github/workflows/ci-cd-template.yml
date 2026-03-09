@@ -43,7 +43,7 @@ on:
 
     secrets:
       GITOPS_TOKEN:
-        description: "GitHub token for GitOps repository access (optional)"
+        description: "GitHub token for GitOps repository access (Required for cross-repo access)"
         required: false
 
     outputs:

@@ -50,7 +50,8 @@ jobs:
       platforms: linux/amd64,linux/arm64
 
     secrets:
-      # Only needed if GitOps repo is private and requires different token
+      # Required if GitOps repo is different from the caller repo (even if public)
+      # Must be a PAT with 'repo' scope (or contents:write + pull_requests:write)
       GITOPS_TOKEN: ${{ secrets.GITOPS_REPO_TOKEN }}
 
   # Post-deployment notification job
