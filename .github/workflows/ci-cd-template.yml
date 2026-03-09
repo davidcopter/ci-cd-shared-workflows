@@ -25,6 +25,11 @@ on:
         description: "Path to Helm chart values.yaml in GitOps repo"
         required: true
         type: string
+      helm_values_alias:
+        description: "Top-level alias key in values.yaml (e.g. 'app' for app.image.tag). Leave empty for root-level image key."
+        required: false
+        type: string
+        default: "app"
       enable_cache:
         description: "Enable Docker layer caching"
         required: false
@@ -250,10 +255,13 @@ jobs:
           CHART_PATH="${{ inputs.helm_chart_path }}"
           IMAGE_TAG="${{ steps.derive-tags.outputs.image_tag }}"
           SERVICE_NAME="${{ inputs.service_name }}"
+          ALIAS="${{ inputs.helm_values_alias }}"
+          IMAGE_REPO="ghcr.io/${{ github.repository_owner }}/${{ inputs.service_name }}"
 
           echo "Updating Helm values for ${SERVICE_NAME}"
           echo "Chart path: ${CHART_PATH}"
           echo "New image tag: ${IMAGE_TAG}"
+          echo "Alias: ${ALIAS:-<none>}"
 
           # Check if values.yaml exists
           if [[ ! -f "${CHART_PATH}" ]]; then
@@ -261,27 +269,37 @@ jobs:
             exit 1
           fi
 
+          # Determine yq paths based on alias
+          if [[ -n "${ALIAS}" ]]; then
+            TAG_PATH=".${ALIAS}.image.tag"
+            REPO_PATH=".${ALIAS}.image.repository"
+            ROOT_KEY="${ALIAS}"
+          else
+            TAG_PATH=".image.tag"
+            REPO_PATH=".image.repository"
+            ROOT_KEY="image"
+          fi
+
           # Update image tag in values.yaml
-          # Assumes structure: image: tag: "value"
-          if grep -q "^image:" "${CHART_PATH}"; then
-            # Using yq if available, otherwise sed
+          if grep -q "^${ROOT_KEY}:" "${CHART_PATH}"; then
             if command -v yq &> /dev/null; then
-              yq eval ".image.tag = \"${IMAGE_TAG}\"" -i "${CHART_PATH}"
+              yq eval "${TAG_PATH} = \"${IMAGE_TAG}\"" -i "${CHART_PATH}"
             else
-              # Fallback to sed - update image.tag line
+              # Fallback to sed - update image.tag line (best-effort)
               sed -i "s/\(tag:\s*\"\?\)[^\"]*\(\"\?\s*\)$/\1${IMAGE_TAG}\2/" "${CHART_PATH}"
             fi
           else
-            # Add image section if not exists
-            echo "" >> "${CHART_PATH}"
-            echo "image:" >> "${CHART_PATH}"
-            echo "  tag: \"${IMAGE_TAG}\"" >> "${CHART_PATH}"
+            # Add section if not exists
+            if [[ -n "${ALIAS}" ]]; then
+              printf '\n%s:\n  image:\n    tag: "%s"\n' "${ALIAS}" "${IMAGE_TAG}" >> "${CHART_PATH}"
+            else
+              printf '\nimage:\n  tag: "%s"\n' "${IMAGE_TAG}" >> "${CHART_PATH}"
+            fi
           fi
 
-          # Also update image.repository if needed
-          IMAGE_REPO="ghcr.io/${{ github.repository_owner }}/${{ inputs.service_name }}"
+          # Also update image.repository if yq is available
           if command -v yq &> /dev/null; then
-            yq eval ".image.repository = \"${IMAGE_REPO}\"" -i "${CHART_PATH}"
+            yq eval "${REPO_PATH} = \"${IMAGE_REPO}\"" -i "${CHART_PATH}"
           fi
 
           # Show changes

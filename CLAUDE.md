@@ -70,15 +70,24 @@ Optional secret: `GITOPS_TOKEN` — only needed when the GitOps repo is in a dif
 
 ### Helm Values Update Contract
 
-The workflow expects this structure in the GitOps repo's `values.yaml`:
+The workflow supports two `values.yaml` structures controlled by `helm_values_alias` (default: `"app"`):
 
+**With alias (default, `helm_values_alias: "app"`):**
+```yaml
+app:
+  image:
+    repository: ghcr.io/<owner>/service-name
+    tag: ""   # updated by the workflow
+```
+
+**Without alias (`helm_values_alias: ""`):**
 ```yaml
 image:
   repository: ghcr.io/<owner>/service-name
   tag: ""   # updated by the workflow
 ```
 
-If the `image:` key is absent, it is appended. The workflow uses `yq` when available, falling back to `sed`.
+If the root key is absent, the section is appended. The workflow uses `yq` when available, falling back to `sed` (sed only updates `tag:`, not `repository:`).
 
 ### Caller Workflow Pattern
 
@@ -95,6 +104,7 @@ jobs:
       service_name: my-service
       gitops_repo: org/gitops-repo
       helm_chart_path: charts/my-service/values.yaml
+      helm_values_alias: app   # default; set to "" for root-level image key
 ```
 
 See `examples/caller-workflow.yml` for the full pattern including the optional `notify-deployment` job that posts commit comments on success/failure.
