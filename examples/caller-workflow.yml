@@ -49,6 +49,16 @@ jobs:
       enable_cache: true
       platforms: linux/amd64,linux/arm64
 
+      # Custom Build Arguments (optional)
+      # Pass additional build args to Docker build (one per line)
+      # Use GitHub context variables and secrets
+      build_args: |
+        CACHE_BUST=${{ github.run_id }}
+        BUILD_NUMBER=${{ github.run_number }}
+        BUILDER=${{ github.actor }}
+        API_ENDPOINT=${{ vars.API_ENDPOINT || 'https://api.default.com' }}
+        ENVIRONMENT=${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
+
     secrets:
       # Required if GitOps repo is different from the caller repo (even if public)
       # Must be a PAT with 'repo' scope (or contents:write + pull_requests:write)

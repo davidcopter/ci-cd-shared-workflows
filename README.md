@@ -155,6 +155,135 @@ ci-cd-shared-workflows/
 | `helm_chart_path`      | ✅       | -                         | Path to values.yaml in GitOps repo   |
 | `enable_cache`         | ❌       | `true`                    | Enable Docker layer caching          |
 | `platforms`            | ❌       | `linux/amd64,linux/arm64` | Target platforms                     |
+| `build_args`           | ❌       | (empty)                   | Additional build arguments (one per line, KEY=VALUE format) |
+
+## Custom Build Arguments
+
+You can pass additional build arguments to the Docker build process using the `build_args` input. These are merged with the default build arguments (`BUILD_DATE`, `VCS_REF`, `VERSION`).
+
+### Usage Example
+
+```yaml
+jobs:
+  deploy:
+    uses: your-org/github-actions-shared-workflows/.github/workflows/ci-cd-template.yml@main
+    with:
+      service_name: my-service
+      gitops_repo: your-org/gitops-repository
+      helm_chart_path: charts/my-service/values.yaml
+      
+      # Custom build arguments using GitHub context and variables
+      build_args: |
+        CACHE_BUST=${{ github.run_id }}
+        BUILD_NUMBER=${{ github.run_number }}
+        BUILDER=${{ github.actor }}
+        API_ENDPOINT=${{ vars.API_ENDPOINT || 'https://api.default.com' }}
+        ENVIRONMENT=${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
+        DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+```
+
+### Available GitHub Context Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `${{ github.run_id }}` | Unique ID for each workflow run | `1234567890` |
+| `${{ github.run_number }}` | Sequential build number | `42` |
+| `${{ github.actor }}` | User who triggered the workflow | `octocat` |
+| `${{ github.sha }}` | Commit SHA | `abc123...` |
+| `${{ github.ref_name }}` | Branch or tag name | `main`, `v1.0.0` |
+| `${{ github.ref }}` | Full ref path | `refs/heads/main` |
+| `${{ vars.NAME }}` | Repository/org variables | Custom config values |
+| `${{ secrets.NAME }}` | Repository/org secrets | Sensitive values |
+
+### Common Use Cases
+
+**1. Cache Busting**
+```yaml
+build_args: |
+  CACHE_BUST=${{ github.run_id }}
+```
+
+**2. Environment-Specific Configuration**
+```yaml
+build_args: |
+  ENVIRONMENT=${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
+  API_URL=${{ github.ref == 'refs/heads/main' && 'https://api.prod.com' || 'https://api.dev.com' }}
+```
+
+**3. Using Repository Variables**
+```yaml
+build_args: |
+  API_ENDPOINT=${{ vars.API_ENDPOINT }}
+  FEATURE_FLAG_X=${{ vars.ENABLE_FEATURE_X }}
+```
+
+**4. Using Secrets (sensitive values)**
+```yaml
+build_args: |
+  DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+  API_KEY=${{ secrets.API_KEY }}
+```
+
+**5. Build Metadata**
+```yaml
+build_args: |
+  BUILD_NUMBER=${{ github.run_number }}
+  BUILD_ID=${{ github.run_id }}
+  BUILDER=${{ github.actor }}
+  COMMIT_SHA=${{ github.sha }}
+```
+
+### How to Set Up Variables and Secrets
+
+**Repository Variables** (non-sensitive):
+1. Go to repository **Settings → Secrets and variables → Variables**
+2. Click "New repository variable"
+3. Enter Name (e.g., `API_ENDPOINT`) and Value
+4. Click "Add variable"
+
+**Repository Secrets** (sensitive):
+1. Go to repository **Settings → Secrets and variables → Secrets**
+2. Click "New repository secret"
+3. Enter Name (e.g., `DB_PASSWORD`) and Value
+4. Click "Add secret"
+
+**Using GitHub CLI**:
+```bash
+# Set a variable
+gh variable set API_ENDPOINT --body "https://api.example.com"
+
+# Set a secret
+echo "my-secret-value" | gh secret set DB_PASSWORD
+```
+
+### How It Works
+
+The workflow automatically includes these default build arguments:
+- `BUILD_DATE` - Timestamp of the build
+- `VCS_REF` - Git commit SHA
+- `VERSION` - Derived image tag
+
+Your custom `build_args` are appended to these defaults, so you can override them if needed or add new ones.
+
+### Dockerfile Example
+
+Your Dockerfile can accept these build args like this:
+
+```dockerfile
+ARG VERSION
+ARG BUILD_DATE
+ARG VCS_REF
+# Custom build args
+ARG CACHE_BUST
+ARG ENVIRONMENT
+ARG API_ENDPOINT
+
+ENV VERSION=${VERSION:-unknown}
+ENV BUILD_DATE=${BUILD_DATE:-unknown}
+ENV VCS_REF=${VCS_REF:-unknown}
+ENV ENVIRONMENT=${ENVIRONMENT:-development}
+ENV API_ENDPOINT=${API_ENDPOINT:-https://api.default.com}
+```
 
 ## Workflow Outputs
 

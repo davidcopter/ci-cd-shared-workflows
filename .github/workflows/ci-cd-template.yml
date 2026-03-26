@@ -40,6 +40,11 @@ on:
         required: false
         type: string
         default: "linux/amd64,linux/arm64"
+      build_args:
+        description: "Additional build arguments (one per line, KEY=VALUE format)"
+        required: false
+        type: string
+        default: ""
 
     secrets:
       GITOPS_TOKEN:
@@ -232,6 +237,7 @@ jobs:
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             VCS_REF=${{ github.sha }}
             VERSION=${{ steps.derive-tags.outputs.image_tag }}
+            ${{ inputs.build_args }}
 
       - name: Output Image URI
         id: image-uri
